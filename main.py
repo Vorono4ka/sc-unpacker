@@ -603,10 +603,12 @@ if __name__ == '__main__':
     sc.parse(True)
 
     if sc.is_texture:
-        if sc.data_name in os.listdir('compressed'):  # background_retropolis.sc
-            sc = SC(sc.data_name, True, True, True, sc.sheets)
-            sc.parse(True)
+        yes_no = _i('Unpack tiles? (Y=YES, n=no)')
+        if yes_no in ['Y', 'YES']:
+            if sc.data_name in os.listdir('compressed'):  # background_retropolis.sc
+                sc = SC(sc.data_name, True, True, True, sc.sheets)
+                sc.parse(True)
 
-            sc.generate_shapes()
-        else:
-            _('Файл данных отсутствует в папке, генерация атласа не будет произведена!')
+                sc.generate_shapes()
+            else:
+                _('Файл данных отсутствует в папке, генерация атласа не будет произведена!')
