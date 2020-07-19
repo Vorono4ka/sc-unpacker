@@ -65,7 +65,7 @@ def region_rotation(region):
     region['mirroring'] = not (shapeOrientation == sheetOrientation)
 
     if region['mirroring']:
-        for x in range(len(region['shape_points '])):
+        for x in range(len(region['shape_points'])):
             points = region['shape_points'][x]
             region['shape_points'][x] = (points[0] * -1, points[1])
 
@@ -101,8 +101,6 @@ def region_rotation(region):
         qy = 2
     else:
         qy = 3
-
-    print(px, py, qx, qy)
 
     rotation = 0
 
@@ -318,7 +316,7 @@ class SC(Reader):
 
             divider = 1
 
-            while len(self.data[self.tell():]) != 0:
+            while len(self.data[self.tell():]) >= 5:
                 data_type = self.readUByte()
                 data_length = self.readUInt32()
                 if data_type in [1, 24]:  # texture
@@ -366,15 +364,12 @@ class SC(Reader):
                     a = self.readUByte()
 
                     self.color_transformations.append((r, g, b, a))
-                elif data_type == 11:
-                    self.readUShort()
-                    self.readString()
                 elif data_type in [12, 35]:  # animation
-                    frames = []
+                    binds = []
 
                     clip_id = self.readUShort()
                     clip_fps = self.readByte()
-                    frames_count = self.readUShort()
+                    binds_count = self.readUShort()
 
                     cnt1 = self.readUInt32()
                     for x in range(cnt1):
@@ -386,7 +381,7 @@ class SC(Reader):
                     for x in range(cnt2):
                         bind_id = self.readUShort()
 
-                        frames.append({
+                        binds.append({
                             'bind_id': bind_id,
                             'opacity': None,
                             'bind_name': None
@@ -395,18 +390,24 @@ class SC(Reader):
                     for x in range(cnt2):
                         opacity = self.readByte()
 
-                        frames[x]['opacity'] = opacity
+                        binds[x]['opacity'] = opacity
 
                     for x in range(cnt2):
                         string = self.readString()
                         if string != '':
-                            frames[x]['bind_name'] = string
+                            binds[x]['bind_name'] = string
+
+                    for x in range(binds_count):
+                        self.readUByte()
+                        self.readUInt32()
+                        self.readUShort()
+                        self.readString()
 
                     self.animations.append({
                         'clip_id': clip_id,
                         'fps': clip_fps,
-                        'frames_count': frames_count,
-                        'frames': frames
+                        'binds_count': binds_count,
+                        'binds': binds
                     })
                 elif data_type == 18:
                     regions = []
@@ -453,6 +454,20 @@ class SC(Reader):
                         'points_count': points_count,
                         'regions': regions
                     })
+                elif data_type == 25:  # text_field
+                    another_data = []
+                    index = self.readUShort()
+                    font_name = self.readString()
+                    another_data.append(self.readUInt32())
+                    self.read(15)  # another_data.append(self.read(15))
+                    another_data.append(self.readString())
+                    self.read(5)  # another_data.append(self.read(9))
+
+                    self.text_fields.append({
+                        'index': index,
+                        'font': font_name,
+                        'another_data': another_data
+                    })
                 elif data_type == 33:  # text_field
                     another_data = []
                     index = self.readUShort()
@@ -482,7 +497,8 @@ class SC(Reader):
                         'another_data': another_data
                     })
                 else:
-                    self.read(data_length)
+                    unk_data = self.read(data_length)
+                    _(data_type, unk_data)
 
             for x in range(self.shape_count):
                 for y in range(len(self.shapes[x]['regions'])):
@@ -515,7 +531,7 @@ class SC(Reader):
 
                     region['size'] = size
 
-                self.shapes[x]['regions'][y] = region
+                    self.shapes[x]['regions'][y] = region
 
             self.sc_data = {'shapes': self.shapes,
                             'animations': self.animations,
@@ -587,7 +603,7 @@ if __name__ == '__main__':
 
     if sc.is_texture:
         if sc.data_name in os.listdir('compressed'):  # background_retropolis.sc
-            sc = SC(sc.data_name, True, False, True, sc.sheets)
+            sc = SC(sc.data_name, True, True, True, sc.sheets)
             sc.parse(True)
 
             sc.generate_shapes()

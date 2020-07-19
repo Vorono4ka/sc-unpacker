@@ -30,7 +30,8 @@ def _e(*args):
 
 class SC:
     def __init__(self, filename: str):
-        self.info_name = filename.split('_tex.sc')[0] + '.sc.parsed.json'
+        self.base_name = filename.split('.sc')[0]
+        self.info_name = self.base_name + '.sc.parsed.json'
 
         self.info = json.load(open(f'parsed/{self.info_name}'))
 
@@ -43,8 +44,8 @@ class SC:
         self.exports = self.info['exports']['names']
 
         self.textures = []
-        for file in os.listdir(f'png/{filename.split(".sc")[0]}'):
-            self.textures.append(Image.open(f'png/{filename.split(".sc")[0]}/{file}'))
+        for file in os.listdir(f'png/{self.base_name}_tex'):
+            self.textures.append(Image.open(f'png/{self.base_name}_tex/{file}'))
         self.filename = filename
 
     def generate_shapes(self):
@@ -54,9 +55,10 @@ class SC:
 
         for x in range(len(self.shapes)):
             for y in range(len(self.shapes[x]['regions'])):
+                shape_name = self.shapes[x]['name'] if 'name' in self.shapes[x] else None
                 region = self.shapes[x]['regions'][y]
 
-                polygon = [region['shape_points'][z] for z in range(len(region['shape_points']))]
+                polygon = [region['sheet_points'][z] for z in range(len(region['sheet_points']))]
 
                 polygon = [tuple(point) for point in polygon]
                 print(polygon)
@@ -78,7 +80,11 @@ class SC:
                 if region['mirroring']:
                     tmpRegion = tmpRegion.transform(region_size, Image.EXTENT, (region_size[0], 0, 0, region_size[1]))
 
-                tmpRegion.rotate(region['rotation'], expand=True).save(f'{export_folder}/{x}_{y}.png')
+                if shape_name is not None:
+                    export_path = f'{export_folder}/{shape_name}_{x}_{y}.png'
+                else:
+                    export_path = f'{export_folder}/{x}_{y}.png'
+                tmpRegion.rotate(region['rotation'], expand=True).save(export_path)
 
 
 if __name__ == '__main__':
