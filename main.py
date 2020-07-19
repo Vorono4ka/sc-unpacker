@@ -153,7 +153,7 @@ class SC(Reader):
 
     def __init__(self, filename: str,
                  compressed: bool = True,
-                 save_decompressed: bool = True,
+                 save_decompressed: bool = False,
                  print_debug_info: bool = False,
                  sheets: list = None):
         self.debugger = Debugger(print_debug_info)
@@ -227,6 +227,9 @@ class SC(Reader):
         decompressed = decompressor.decompress(data)
 
         if save_decompressed:
+            if not os.path.exists('decompressed'):
+                os.mkdir('decompressed')
+
             with open('decompressed/' + self.filename, 'wb') as file:
                 file.write(decompressed)
 
@@ -584,8 +587,6 @@ class SC(Reader):
 
 
 if __name__ == '__main__':
-    if not os.path.exists('decompressed'):
-        os.mkdir('decompressed')
     if not os.path.exists('compressed'):
         os.mkdir('compressed')
 
