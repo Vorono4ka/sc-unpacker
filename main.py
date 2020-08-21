@@ -1,614 +1,359 @@
-import json
-import lzma
 import os
 import sys
 
 from PIL import Image, ImageDraw
+from sc_compression.compression import Decompressor
 
+from utils.chunks import Export, Texture, Shape, MovieClip, TextField, Matrix, Color, ScObject
+from utils.chunks import CustomObject
 from utils.reader import Reader
 
 
-def _(*args):
-    print(f'[SC Tool] ', end='')
-    for arg in args:
-        print(arg, end=' ')
+def progressbar(current, total, message):
+    sys.stdout.write(f"\r[{percent(current, total)}%] {message}")
+
+
+def percent(current, total):
+    return (current + 1) * 100 // total
+
+
+def join_image(img, p):
+    _w, _h = img.size
+    imgl = img.load()
+    x = 0
+    a = 32
+
+    _ha = _h // a
+    _wa = _w // a
+    ha = _h % a
+    wa = _w % a
+
+    for l in range(_ha):
+        for k in range(_wa):
+            for j in range(a):
+                for h in range(a):
+                    imgl[h + k * a, j + l * a] = p[x]
+                    x += 1
+
+        for j in range(a):
+            for h in range(wa):
+                imgl[h + (_w - wa), j + l * a] = p[x]
+                x += 1
+        progressbar(l, _ha, 'Joining picture...')
+
+    for k in range(_wa):
+        for j in range(ha):
+            for h in range(a):
+                imgl[h + k * a, j + (_h - ha)] = p[x]
+                x += 1
+
+    for j in range(ha):
+        for h in range(wa):
+            imgl[h + (_w - wa), j + (_h - ha)] = p[x]
+            x += 1
+    progressbar(l, _ha, 'Joining picture...')
     print()
 
 
-def _i(text: str):
-    return input(f'[SC Tool] {text}: ')
-
-
-def _e(*args):
-    print('[Error] ', end='')
-    for arg in args:
-        print(arg, end=' ')
-    print()
-    input('Press Enter to exit: ')
-    sys.exit()
-
-
-class Debugger:
-    def __init__(self, print_debug_info: bool = True):
-        self.print_debug_info = print_debug_info
-
-    def _w(self, *args):
-        if self.print_debug_info:
-            print('[Warning] ', end='')
-            for arg in args:
-                print(arg, end=' ')
-            print()
-
-    def _wi(self, data):
-        if self.print_debug_info:
-            print('[Warning] ', end='')
-            return input(f'{data}: ')
-
-
-def region_rotation(region):
-    def calculate_summary(points):
-        x1, y1 = points[(z + 1) % len(region['sheet_points'])]
-        x2, y2 = points[z]
-        summary = (x1 - x2) * (y1 + y2)
-        return summary
-
-    summSheet = 0
-    summShape = 0
-
-    for z in range(len(region['sheet_points'])):
-        summSheet += calculate_summary(region['sheet_points'])
-        summShape += calculate_summary(region['shape_points'])
-
-    sheetOrientation = -1 if (summSheet < 0) else 1
-    shapeOrientation = -1 if (summShape < 0) else 1
-
-    region['mirroring'] = not (shapeOrientation == sheetOrientation)
-
-    if region['mirroring']:
-        for x in range(len(region['shape_points'])):
-            points = region['shape_points'][x]
-            region['shape_points'][x] = (points[0] * -1, points[1])
-
-    sheet_pointX = region['sheet_points'][0]
-    sheet_pointY = region['sheet_points'][1]
-    shape_pointX = region['shape_points'][0]
-    shape_pointY = region['shape_points'][1]
-
-    if sheet_pointY[0] > sheet_pointX[0]:
-        px = 1
-    elif sheet_pointY[0] < sheet_pointX[0]:
-        px = 2
-    else:
-        px = 3
-
-    if sheet_pointY[1] < sheet_pointX[1]:
-        py = 1
-    elif sheet_pointY[1] > sheet_pointX[1]:
-        py = 2
-    else:
-        py = 3
-
-    if shape_pointY[0] > shape_pointX[0]:
-        qx = 1
-    elif shape_pointY[0] < shape_pointX[0]:
-        qx = 2
-    else:
-        qx = 3
-
-    if shape_pointY[1] > shape_pointX[1]:
-        qy = 1
-    elif shape_pointY[1] < shape_pointX[1]:
-        qy = 2
-    else:
-        qy = 3
-
-    rotation = 0
-
-    if px == qx and py == qy:
-        rotation = 0
-    elif px == 3:
-        if px == qy:
-            if py == qx:
-                rotation = 1
-            else:
-                rotation = 3
-        else:
-            rotation = 2
-    elif py == 3:
-        if py == qx:
-            if px == qy:
-                rotation = 3
-            else:
-                rotation = 1
-        else:
-            rotation = 2
-    elif px != qx and py != qy:
-        rotation = 2
-    elif px == py:
-        if px != qx:
-            rotation = 3
-        elif py != qy:
-            rotation = 1
-    elif px != py:
-        if px != qx:
-            rotation = 1
-        elif py != qy:
-            rotation = 3
-
-    if sheetOrientation == -1 and rotation in (1, 3):
-        rotation += 2
-        rotation %= 4
-
-    region['rotation'] = rotation * 90
-    return region
-
-
-class SC(Reader):
-    def readString(self):
-        length = self.readUByte()
-        if length < 255:
-            return self.readChar(length)
-        else:
-            return ''
-
-    def __init__(self, filename: str,
-                 compressed: bool = True,
-                 save_decompressed: bool = False,
-                 print_debug_info: bool = False,
-                 sheets: list = None):
-        self.debugger = Debugger(print_debug_info)
-        self.sheets = sheets
-
-        self.base_name = filename.split('.sc')[0]
-        self.is_texture = self.base_name.endswith('_tex')
-        if not self.is_texture:
-            self.sc_data = {}
-
-            self.shapes = []
-            self.animations = []
-            self.textures = []
-            self.text_fields = []
-            self.matrices = []
-            self.color_transformations = []
-
-            self.exports = {'names': []}
-
-            self.shape_count = 0
-            self.animations_count = 0
-            self.textures_count = 0
-            self.text_fields_count = 0
-            self.matrix_count = 0
-            self.color_transformations_count = 0
-        else:
-            self.sheets = []
-
-            self.data_name = self.base_name[:-4] + '.sc'
-        self.filename = filename
-
-        if compressed:
-            with open('compressed/' + filename, 'rb') as file:
-                self.data = file.read()
-
-                file.close()
-
-            self.decompress(save_decompressed)
-        else:
-            with open('decompressed/' + filename, 'rb') as file:
-                self.data = file.read()
-
-                file.close()
-
-        super().__init__(self.data, '<')
-
-    def convert_pixel(self, pixel_type):
-        if pixel_type == 0:  # RGB8888
-            return self.readUByte(), self.readUByte(), self.readUByte(), self.readUByte()
-        elif pixel_type == 2:  # RGB4444
+class SC(ScObject):
+    def readPixel(self, pixel_type) -> tuple:
+        if pixel_type == 0:
+            r = self.readUByte()
+            g = self.readUByte()
+            b = self.readUByte()
+            a = self.readUByte()
+            return r, g, b, a
+        elif pixel_type == 2:
             pixel = self.readUShort()
-            return (((pixel >> 12) & 0xF) << 4, ((pixel >> 8) & 0xF) << 4,
-                    ((pixel >> 4) & 0xF) << 4, ((pixel >> 0) & 0xF) << 4)
-        elif pixel_type == 4:  # RGB565
+            r = ((pixel >> 12) & 0xF) << 4
+            g = ((pixel >> 8) & 0xF) << 4
+            b = ((pixel >> 4) & 0xF) << 4
+            a = ((pixel >> 0) & 0xF) << 4
+            return r, g, b, a
+        elif pixel_type == 4:
             pixel = self.readUShort()
-            return ((pixel >> 11) & 0x1F) << 3, ((pixel >> 5) & 0x3F) << 2, (pixel & 0x1F) << 3
-        elif pixel_type == 6:  # LA88
+            r = ((pixel >> 11) & 0x1F) << 3
+            g = ((pixel >> 5) & 0x3F) << 2
+            b = (pixel & 0x1F) << 3
+            return r, g, b
+        elif pixel_type == 6:
             pixel = self.readUShort()
-            return (pixel >> 8), (pixel >> 8), (pixel >> 8), (pixel & 0xFF)
-        elif pixel_type == 10:  # L8
+            r = (pixel >> 8)
+            g = (pixel >> 8)
+            b = (pixel >> 8)
+            a = (pixel & 0xFF)
+            return r, g, b, a
+        elif pixel_type == 10:
             pixel = self.readUByte()
-            return pixel, pixel, pixel
+            r = pixel
+            g = pixel
+            b = pixel
+            return r, g, b
 
-    def decompress(self, save_decompressed: bool):
-        if self.data[0] != 93:
-            self.data = self.data[26:]
-        xbytes = b'\xff' * 8
+    def __init__(self, filename: str):
+        self.basename = os.path.splitext(filename)[0]
 
-        data = self.data[0:5] + xbytes + self.data[9:]
-        decompressor = lzma.LZMADecompressor()
-        decompressed = decompressor.decompress(data)
+        with open(f'sc/{filename}', 'rb') as fh:
+            buffer = fh.read()
+            fh.close()
 
-        if save_decompressed:
-            if not os.path.exists('decompressed'):
-                os.mkdir('decompressed')
+        decompressor = Decompressor()
+        buffer = decompressor.decompress(buffer)
 
-            with open('decompressed/' + self.filename, 'wb') as file:
-                file.write(decompressed)
+        Reader.__init__(self, buffer, 'little')
 
-                file.close()
-
-        self.data = decompressed
-
-    def parse(self, save_parsed_data: bool = False,
-              save_texture: bool = True):
-        # try:
+        self.is_texture = self.basename.endswith('_tex')
         if self.is_texture:
-            filename = self.filename.split('.sc')[0]
-            picture_index = 0
+            if not os.path.exists('png'):
+                os.mkdir('png')
 
-            if not os.path.exists(f'png/{filename}'):
-                os.mkdir(f'png/{filename}')
-            while len(self.data[self.tell():]) > 5:
-                pixels = []
+        self.shape_count: int = 0
+        self.clips_count: int = 0
+        self.textures_count: int = 0
+        self.text_fields_count: int = 0
+        self.matrix_count: int = 0
+        self.color_transformations_count: int = 0
 
+        self.shapes: list = []
+        self.clips: list = []
+        self.textures: list = []
+        self.text_fields: list = []
+        self.matrix: list = []
+        self.color_transformations: list = []
+
+        self.exports: list = []
+
+    def parse(self):
+        if self.is_texture:
+            export_folder = 'png/' + self.basename + '/'
+
+            if not os.path.exists(export_folder):
+                os.mkdir(export_folder)
+
+            i = 0
+            while len(self.buffer[self.tell():]) > 10:
                 file_type = self.readUByte()
-                if file_type != 0:
-                    file_size = self.readUInt32()
-                    pixel_type = self.readUByte()
-                    width = self.readUShort()
-                    height = self.readUShort()
+                file_size = self.readUInt32()
+                pixel_type = self.readUByte()
+                width = self.readUShort()
+                height = self.readUShort()
 
-                    _(f'File Size: {round(file_size / 8 / 1024 / 1024, 2)}Mb, Width: {width}, Height: {height}')
+                pixels = []
+                for y in range(height):
+                    for x in range(width):
+                        pixels.append(self.readPixel(pixel_type))
+                        progressbar(len(pixels), width * height, 'Creating picture...')
 
-                    img = Image.new('RGBA', (width, height))
+                if pixel_type in range(4):
+                    img_format = 'RGBA'
+                elif pixel_type == 4:
+                    img_format = 'RGB'
+                elif pixel_type == 6:
+                    img_format = 'LA'
+                elif pixel_type == 10:
+                    img_format = 'L'
+                else:
+                    raise TypeError('Ban.')
 
-                    for y in range(height):
-                        for x in range(width):
-                            pixels.append(self.convert_pixel(pixel_type))
+                image = Image.new(img_format, (width, height))
 
-                    img.putdata(pixels)
+                image.putdata(pixels)
 
-                    if file_type in [27, 28]:
-                        imgl = img.load()
-                        iSrcPix = 0
-                        for l in range(int(height / 32)):
-                            for k in range(int(width / 32)):
-                                for j in range(32):
-                                    for h in range(32):
-                                        imgl[h + (k * 32), j + (l * 32)] = pixels[iSrcPix]
-                                        iSrcPix += 1
-                            for j in range(32):
-                                for h in range(width % 32):
-                                    imgl[h + (width - (width % 32)), j + (l * 32)] = pixels[iSrcPix]
-                                    iSrcPix += 1
+                if file_type in [27, 28]:
+                    join_image(image, pixels)
 
-                        for k in range(int(width / 32)):
-                            for j in range(int(height % 32)):
-                                for h in range(32):
-                                    imgl[h + (k * 32), j + (height - (height % 32))] = pixels[iSrcPix]
-                                    iSrcPix += 1
+                export_path = export_folder + self.basename + '_' * i + '.png'
 
-                        for j in range(height % 32):
-                            for h in range(width % 32):
-                                imgl[h + (width - (width % 32)), j + (height - (height % 32))] = pixels[iSrcPix]
-                                iSrcPix += 1
-
-                    export_name = filename + '_' * picture_index
-                    picture_index += 1
-
-                    self.sheets.append(img)
-
-                    if save_texture:
-                        img.save(f'png/{filename}/{export_name}.png', 'PNG')
+                image.save(export_path)
+                i += 1
         else:
             self.shape_count = self.readUShort()
-            self.animations_count = self.readUShort()
+            self.clips_count = self.readUShort()
             self.textures_count = self.readUShort()
             self.text_fields_count = self.readUShort()
             self.matrix_count = self.readUShort()
             self.color_transformations_count = self.readUShort()
 
-            self.read(5)
+            self.readInt32()
+            self.readByte()
 
             exports_count = self.readUShort()
             for x in range(exports_count):
-                self.readUShort()
+                self.exports.append(Export())
 
+                self.exports[x].id = self.readUShort()
             for x in range(exports_count):
-                export_name = self.readString()
-                if export_name != '':
-                    self.exports['names'].append(export_name)
+                self.exports[x].name = self.readString()
 
-            divider = 1
+            while len(self.buffer[self.tell():]) >= 5:
+                progressbar(len(self.buffer) - len(self.buffer[self.tell():]), len(self.buffer),
+                            'Data Parsing...')
 
-            while len(self.data[self.tell():]) >= 5:
-                data_type = self.readUByte()
-                data_length = self.readUInt32()
-                if data_type in [1, 24]:  # texture
-                    pixel_type = self.readByte()
+                tag = self.readUByte()
+                length = self.readUInt32()
+                data = self.read(length)
 
-                    width = self.readUShort()
-                    height = self.readUShort()
+                if tag in [1, 16, 28, 29, 34]:  # Texture
+                    texture = Texture(data, tag)
+                    texture.parse()
 
-                    if self.sheets is not None:
-                        if self.sheets[len(self.textures)].size != (width, height):
-                            divider = 2
-                        else:
-                            divider = 1
+                    self.textures.append(texture)
+                elif tag in [2, 18]:  # Shape Id
+                    shape = Shape(data, tag)
+                    shape.parse(textures=self.textures)
 
-                    self.textures.append({
-                        'pixel_type': pixel_type,
-                        'size': (width,
-                                 height)
-                    })
-                elif data_type == 7:  # text_field
-                    another_data = []
-                    index = self.readUShort()
-                    font_name = self.readString()
-                    another_data.append(self.readUInt32())
-                    self.read(6)  # another_data.append(self.read(6))
-                    another_data.append(self.readUInt32())
-                    self.read(5)  # another_data.append(self.read(5))
-                    self.readString()
+                    self.shapes.append(shape)
+                elif tag in [3, 10, 12, 14]:  # MovieClip
+                    movie_clip = MovieClip(data, tag)
+                    movie_clip.parse()
 
-                    self.text_fields.append({
-                        'index': index,
-                        'font': font_name,
-                        'another_data': another_data
-                    })
-                elif data_type == 8:  # matrix
-                    matrix = []
-                    for x in range(6):
-                        matrix.append(self.readInt32())
+                    self.clips.append(movie_clip)
+                elif tag in [7, 15, 20, 21, 25, 33]:  # Text Fields
+                    text_field = TextField(data, tag)
+                    text_field.parse()
 
-                    self.matrices.append(matrix)
-                elif data_type == 9:  # color_transformation
-                    r = self.readUShort()
-                    g = self.readUShort()
-                    b = self.readUShort()
-                    a = self.readUByte()
+                    self.text_fields.append(text_field)
+                elif tag in [8]:  # Matrix
+                    matrix = Matrix(data, tag)
+                    matrix.parse()
 
-                    self.color_transformations.append((r, g, b, a))
-                elif data_type in [12, 35]:  # animation
-                    binds = []
+                    self.matrix.append(matrix)
+                elif tag in [9]:  # Color Transformation
+                    color = Color(data, tag)
+                    color.parse()
 
-                    clip_id = self.readUShort()
-                    clip_fps = self.readByte()
-                    binds_count = self.readUShort()
+                    self.color_transformations.append(color)
+                # elif tag in [13]:
+                #     pass
+                # elif tag in [19, 24, 27]:
+                #     pass
+                # elif tag in [23]:
+                #     pass
+                # elif tag in [26]:
+                #     pass
+                # elif tag in [30]:
+                #     pass
+                # elif tag in [32]:
+                #     pass
+                # else:
+                #     print(tag, data)
 
-                    cnt1 = self.readUInt32()
-                    for x in range(cnt1):
-                        self.readUShort()  # animation  # saTag12Nr =
-                        self.readUShort()  # bind_matrix  # saTag08Nr =
-                        self.readUShort()  # bind_color_transformation  # saTag09Nr =
+            print()
+            print('-' * 30)
 
-                    cnt2 = self.readShort()
-                    for x in range(cnt2):
-                        bind_id = self.readUShort()
+            print(f'Shapes: {len(self.shapes) == self.shape_count}',
+                  f'Clips: {len(self.clips) == self.clips_count}',
+                  f'Textures: {len(self.textures) == self.textures_count}',
+                  f'Text Fields: {len(self.text_fields) == self.text_fields_count}',
+                  f'Matrix: {len(self.matrix) == self.matrix_count}',
+                  f'Color Transforms: {len(self.color_transformations) == self.color_transformations_count}',
+                  sep='\n')
 
-                        binds.append({
-                            'bind_id': bind_id,
-                            'opacity': None,
-                            'bind_name': None
-                        })
 
-                    for x in range(cnt2):
-                        opacity = self.readByte()
+class Unpacker(CustomObject):
+    def __init__(self, data: SC):
+        self.export_path = 'sprites'
+        self.textures = []
+        self.binds = []
 
-                        binds[x]['opacity'] = opacity
+        textures_path = 'png/' + data.basename + '_tex/'
+        for file in os.listdir(textures_path):
+            texture = Image.open(open(textures_path + file, 'rb'))
+            self.textures.append(texture)
 
-                    for x in range(cnt2):
-                        string = self.readString()
-                        if string != '':
-                            binds[x]['bind_name'] = string
+        data.clips = {clip.id: clip for clip in data.clips}
+        data.shapes = {shape.id: shape for shape in data.shapes}
+        data.text_fields = {text_field.id: text_field for text_field in data.text_fields}
+        self.data = data
 
-                    for x in range(binds_count):
-                        self.readUByte()
-                        self.readUInt32()
-                        self.readUShort()
-                        self.readString()
+        for export in self.data.exports:
+            self.parse_export(export)
 
-                    self.animations.append({
-                        'clip_id': clip_id,
-                        'fps': clip_fps,
-                        'binds_count': binds_count,
-                        'binds': binds
-                    })
-                elif data_type == 18:
-                    regions = []
+    def parse_export(self, export: Export):
+        export_name = export.name
+        export_id = export.id
+        self.binds = {}
 
-                    shape_id = self.readUShort()
-                    regions_count = self.readUShort()
-                    points_count = self.readUShort()
+        self.export_path = 'sprites/' + self.data.basename + '/' + export_name + '/'
 
-                    for x in range(regions_count):
-                        data_block_tag16 = self.readUByte()
-                        if data_block_tag16 == 22:
-                            self.readUInt32()  # data_block_size16 =
-                            sheet_id = self.readByte()
+        clip = self.data.clips[export_id]
 
-                            sheet_data = {
-                                'sheet_id': sheet_id,
-                                'shape_points': [],
-                                'sheet_points': []
-                            }
+        del clip.transforms[1:]
+        del clip.binds[1:]
 
-                            num_points = self.readByte()
-                            for i in range(num_points):
-                                x = self.readInt32()
-                                y = self.readInt32()
+        print(export_name, '-->', clip)
+        regions = self.parse_movie_clip(clip)
+        self.save_region(regions, '')
 
-                                sheet_data['shape_points'].append(
-                                    (x, y)
-                                )
+    def parse_movie_clip(self, clip):
+        regions = []
 
-                            for i in range(num_points):
-                                x = self.readUShort()
-                                y = self.readUShort()
+        for bind in clip.binds:
+            bind_id = bind['bind_id']
+            if bind_id in self.data.clips:
+                bind_data = self.data.clips[bind_id]
+                to_append_regions = self.parse_movie_clip(bind_data)
+                regions.append(to_append_regions)
+            elif bind_id in self.data.shapes:
+                shape = self.data.shapes[bind_id]
 
-                                sheet_data['sheet_points'].append(
-                                    (int(round(x * self.textures[sheet_id]['size'][0] / 65535) / divider),
-                                     int(round(y * self.textures[sheet_id]['size'][1] / 65535) / divider))
-                                )
+                for region in shape.regions:
+                    region = self.draw_region(region)
+                    regions.append(region)
+            elif bind_id in self.data.text_fields:
+                text_field = self.data.text_fields[bind_id]
+            else:
+                print(bind_id)
 
-                            regions.append(sheet_data)
-                    self.read(5)
+        return regions
 
-                    self.shapes.append({
-                        'index': shape_id,
-                        'points_count': points_count,
-                        'regions': regions
-                    })
-                elif data_type == 25:  # text_field
-                    another_data = []
-                    index = self.readUShort()
-                    font_name = self.readString()
-                    another_data.append(self.readUInt32())
-                    self.read(15)  # another_data.append(self.read(15))
-                    another_data.append(self.readString())
-                    self.read(5)  # another_data.append(self.read(9))
+    def draw_region(self, region):
+        texture = self.textures[region.texture_id]
 
-                    self.text_fields.append({
-                        'index': index,
-                        'font': font_name,
-                        'another_data': another_data
-                    })
-                elif data_type == 33:  # text_field
-                    another_data = []
-                    index = self.readUShort()
-                    font_name = self.readString()
-                    another_data.append(self.readUInt32())
-                    self.read(15)  # another_data.append(self.read(15))
-                    another_data.append(self.readString())
-                    self.read(9)  # another_data.append(self.read(9))
+        polygon = [(round(point.x), round(point.y)) for point in region.shape_points]
+        size = (
+            texture.size[0],
+            texture.size[1]
+        )
 
-                    self.text_fields.append({
-                        'index': index,
-                        'font': font_name,
-                        'another_data': another_data
-                    })
-                elif data_type == 44:  # text_field
-                    another_data = []
-                    index = self.readUShort()
-                    font_name = self.readString()
-                    another_data.append(self.readUInt32())
-                    self.read(15)  # another_data.append(self.read(15))
-                    another_data.append(self.readString())
-                    self.read(12)  # another_data.append(self.read(12))
+        imMask = Image.new('L', size, 0)
+        ImageDraw.Draw(imMask).polygon(polygon, fill=255)
+        bbox = imMask.getbbox()
+        if bbox is None:
+            polygon[2:] = [(point[0] + 1, point[1] + 1) for point in polygon[2:]]
+            ImageDraw.Draw(imMask).polygon(polygon, fill=255)
+            bbox = imMask.getbbox()
+        region_size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+        tmpRegion = Image.new('RGBA', region_size, None)
+        tmpRegion.paste(texture.crop(bbox), None, imMask.crop(bbox))
 
-                    self.text_fields.append({
-                        'index': index,
-                        'font': font_name,
-                        'another_data': another_data
-                    })
-                else:
-                    unk_data = self.read(data_length)
-                    _(data_type, unk_data)
+        return tmpRegion
 
-            for x in range(self.shape_count):
-                for y in range(len(self.shapes[x]['regions'])):
+    def save_region(self, region, export_name):
+        if not os.path.exists(self.export_path):
+            os.makedirs(self.export_path)
 
-                    region = self.shapes[x]['regions'][y]
-
-                    regionMinX = 32767
-                    regionMaxX = -32767
-                    regionMinY = 32767
-                    regionMaxY = -32767
-                    for z in range(len(region['sheet_points'])):
-                        tmpX, tmpY = region['sheet_points'][z]
-
-                        if tmpX < regionMinX:
-                            regionMinX = tmpX
-                        if tmpX > regionMaxX:
-                            regionMaxX = tmpX
-                        if tmpY < regionMinY:
-                            regionMinY = tmpY
-                        if tmpY > regionMaxY:
-                            regionMaxY = tmpY
-
-                    region = region_rotation(region)
-
-                    tmpX, tmpY = regionMaxX - regionMinX, regionMaxY - regionMinY
-                    size = (tmpX, tmpY)
-
-                    if region['rotation'] in (90, 270):
-                        size = size[::-1]
-
-                    region['size'] = size
-
-                    self.shapes[x]['regions'][y] = region
-
-            self.sc_data = {'shapes': self.shapes,
-                            'animations': self.animations,
-                            'textures': self.textures,
-                            'text_fields': self.text_fields,
-                            'matrices': self.matrices,
-                            'color_transformations': self.color_transformations,
-
-                            'exports': self.exports}
-
-            print(f'shape_count = len(self.shapes)? - {self.shape_count == len(self.shapes)}\n',
-                  f'animations_count = len(animations)? - {self.animations_count == len(self.animations)}\n',
-                  f'textures_count = len(textures)? - {self.textures_count == len(self.textures)}\n',
-                  f'text_fields_count = len(text_fields)? - {self.text_fields_count == len(self.text_fields)}\n',
-                  f'matrix_count = len(matrices)? - {self.matrix_count == len(self.matrices)}\n',
-                  f'color_transforms_count = len(color_transforms)? - ',
-                  self.color_transformations_count == len(self.color_transformations), '\n', sep='')
-            if save_parsed_data:
-                json.dump(self.sc_data, open(f'parsed/{self.filename}.parsed.json', 'w'), indent=4)
-        # except Exception as e:
-        #     _e(e.with_traceback(e.__traceback__))
-
-    def generate_shapes(self):
-        export_folder = f'sprites/{self.filename.split(".sc")[0]}/'
-        if not os.path.exists(export_folder):
-            os.mkdir(export_folder)
-
-        for x in range(len(self.shapes)):
-            for y in range(len(self.shapes[x]['regions'])):
-                region = self.shapes[x]['regions'][y]
-
-                polygon = [region['sheet_points'][z] for z in range(len(region['sheet_points']))]
-
-                polygon = [tuple(point) for point in polygon]
-
-                imMask = Image.new('L', self.textures[region['sheet_id']]['size'], 0)
-                ImageDraw.Draw(imMask).polygon(polygon, fill=255)
-                bbox = imMask.getbbox()
-                if not bbox:
-                    continue
-
-                region_size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
-                tmpRegion = Image.new('RGBA', region_size, None)
-
-                tmpRegion.paste(self.sheets[region['sheet_id']].crop(bbox), None, imMask.crop(bbox))
-                if region['mirroring']:
-                    tmpRegion = tmpRegion.transform(region_size, Image.EXTENT, (region_size[0], 0, 0, region_size[1]))
-
-                tmpRegion.rotate(region['rotation'], expand=True).save(f'{export_folder}/{x}_{y}.png')
+        if type(region) is list:
+            for sub_region_index in range(len(region)):
+                self.save_region(
+                    region[sub_region_index],
+                    str(sub_region_index) + export_name
+                )
+        else:
+            region.save(self.export_path + str(export_name) + '.png')
 
 
 if __name__ == '__main__':
-    if not os.path.exists('compressed'):
-        os.mkdir('compressed')
+    if not os.path.exists('sc'):
+        os.mkdir('sc')
 
-    if not os.path.exists('sprites'):
-        os.mkdir('sprites')
+    # sc = SC('sc_name_tex.sc')
+    # sc.parse()
 
-    if not os.path.exists('parsed'):
-        os.mkdir('parsed')
+    # sc = SC('sc_name.sc')
+    # sc.parse()
 
-    if not os.path.exists('png'):
-        os.mkdir('png')
+    print()
+    print()
 
-    sc = SC(_i('SC Filename'))
-    sc.parse(True)
-
-    if sc.is_texture:
-        yes_no = _i('Unpack tiles? (Y=YES, n=no)')
-        if yes_no in ['Y', 'YES']:
-            if sc.data_name in os.listdir('compressed'):  # background_retropolis.sc
-                sc = SC(sc.data_name, True, True, True, sc.sheets)
-                sc.parse(True)
-
-                sc.generate_shapes()
-            else:
-                _('Файл данных отсутствует в папке, генерация атласа не будет произведена!')
+    unpacker = Unpacker(sc)
