@@ -1,8 +1,3 @@
 # sc-unpacker
-Unpack Tiles From SC
 
-1. Run Script
-2. Type the sc name (\*.sc) (If it's not \_tex.sc, unpacker doesn't work! :) It's specially function)
-3. Enjoy!
-
-If you are already have parsed sc and pngs, you can just run unpacker.py!
+I cannot apply the transformation, since after applying it the picture crawls out of the edges, I do not know how to fix this and I do not think that it is possible to do it in Python, so I postpone the project for a while until I rewrite it to  another programming language, maybe it will be C#
